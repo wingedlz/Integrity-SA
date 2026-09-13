@@ -26,9 +26,9 @@
 .\scripts\run_synth.ps1 -Vivado C:/Xilinx/Vivado/2023.2/bin/vivado.bat
 ```
 
-기본 시험은 K=32 초기 정상 GEMM 128개, directed case 14개와 원래 입력 재제출 14회, reset 후 정상 tile 1개를 수행한다. K=1/7/31도 각 8개 정상 GEMM을 수행한다. **정상 GEMM 167개 / golden output 171,008개가 통과했다.** Directed case는 검출 12개, 명시적으로 확인한 보호 한계 2개다. 한계 사례는 정상 GEMM이나 검출 성공 수에 넣지 않는다.
+테스트벤치는 독립 golden GEMM과의 출력 비교, stall/backpressure, directed fault injection 및 미검출 사례를 검사하도록 구성되어 있다. 실행 결과는 생성된 로그에서 확인한다.
 
-실행 결과는 `build/raw_transport_no_sram/`에 저장한다. 검증 결과와 유효 범위는 `VALIDATION.md`에 정리되어 있다.
+실행 결과는 `build/raw_transport_no_sram/`에 저장한다.
 
 합성 wrapper는 이 호스트의 Vivado/Windows Tcl 정리 오류를 피하려고 고유 임시 디렉터리와 `--keep-temp`를 사용한다. 임시 경로와 source hash를 기록하며 설치 파일은 수정하지 않는다. FPGA 합성과 구조 검사, device-fit/DRC, 배치·배선 결과는 구분한다.
 
@@ -140,4 +140,4 @@ TB는 ingress 변경을 `EXPECTED_UNPROTECTED_INPUT`, accumulator +105를 `EXPEC
 | Controller/global flags | 21 |
 | **Total** | **78,677** |
 
-전체 area는 register 수만으로 판단할 수 없다. 합성 결과는 `VALIDATION.md`에 기록되어 있으며, DMR 대비 ASIC 면적·전력 절감률은 동일 조건의 baseline 비교가 필요하다.
+전체 area는 register 수만으로 판단할 수 없다. DMR 대비 ASIC 면적·전력 절감률은 동일 조건의 baseline 비교가 필요하다.

@@ -16,21 +16,59 @@
 | `tb/tb_residue.v` | 변환기·reduction·residue MAC·PE 단위검사 |
 | `tb/tb_stream_checker.v` | Raw byte 데이터·순서·누락·추가 검사 |
 | `scripts/run_tests.ps1` | Verilog-2001 compile, simulation, PASS/FAIL 확인 |
-| `scripts/run_synth.ps1` | 임시 복사본 합성, source hash 확인, 보고서 회수 |
-| `scripts/synth_check.tcl` | 전체 array FPGA 합성 및 구조 검사 |
 
 이 디렉터리에서 PowerShell로 실행한다. 도구가 PATH에 있으면 경로 인자를 생략할 수 있다.
 
 ```powershell
 .\scripts\run_tests.ps1 -Iverilog C:/iverilog/bin/iverilog.exe -Vvp C:/iverilog/bin/vvp.exe
-.\scripts\run_synth.ps1 -Vivado C:/Xilinx/Vivado/2023.2/bin/vivado.bat
 ```
-
-테스트벤치는 독립 golden GEMM과의 출력 비교, stall/backpressure, directed fault injection 및 미검출 사례를 검사하도록 구성되어 있다. 실행 결과는 생성된 로그에서 확인한다.
 
 실행 결과는 `build/raw_transport_no_sram/`에 저장한다.
 
-합성 wrapper는 이 호스트의 Vivado/Windows Tcl 정리 오류를 피하려고 고유 임시 디렉터리와 `--keep-temp`를 사용한다. 임시 경로와 source hash를 기록하며 설치 파일은 수정하지 않는다. FPGA 합성과 구조 검사, device-fit/DRC, 배치·배선 결과는 구분한다.
+## GEMM simulation tests
+
+다음은 `tb/tb_integrity_sa.v`와 기본 `run_tests.ps1`에 정의된 테스트 구성이다. PASS 여부는 실행 로그에서 확인한다.
+
+### 행렬 크기와 입력 패턴
+
+- A는 32×K, B는 K×32이며, signed INT8 입력과 INT32 출력을 사용한다.
+- K=32에서 기본 입력 패턴 128개를 검사한다. 처음 7개는 아래 지정 패턴이며, 나머지 121개는 random INT8 행렬이다.
+- K=1, 7, 31에서도 각각 지정 패턴 7개와 random 행렬 1개를 검사한다. 이 세 실행에서는 fault injection을 수행하지 않는다.
+- Random 입력과 stall 생성에는 고정 seed `32'h71815ace`를 사용한다.
+
+| 지정 패턴 | A / B 구성 |
+|---|---|
+| Zero | A와 B 모두 0 |
+| Identity-like | A[r,k]는 r=k일 때 1, 나머지 0; B는 random |
+| 음수 극값 | A와 B 모두 -128 |
+| 양수 극값 | A와 B 모두 127 |
+| 극값 혼합 | A는 -128, B는 127 |
+| 교대 부호 | -128과 127을 행·열 인덱스에 따라 교대로 배치 |
+| Sparse | 각 원소를 약 1/8의 확률로 random 값으로 지정하고 나머지는 0 |
+
+Golden model은 PE나 residue 회로를 재사용하지 않고 signed integer 곱셈·덧셈으로 계산한다. 정상 tile마다 1,024개 출력 값, column 31→0의 drain 순서, 출력 residue를 비교한다. Random compute stall과 output backpressure를 적용하고, backpressure 중 출력 유지 및 done/commit/replay 신호도 검사한다.
+
+### Fault injection과 재제출
+
+K=32에서는 A와 B가 모두 1인 행렬로 다음 14개 directed case를 실행한다. 각 case 뒤에는 TB가 원래 입력으로 정상 tile을 다시 제출한다.
+
+| 오류 주입 | Case 수 | 기대 동작 |
+|---|---:|---|
+| A forwarding register의 MSB 또는 LSB flip | 2 | Transport·arithmetic 오류 검출 |
+| Main multiplier 출력을 활성 1 cycle 동안 0으로 강제 | 1 | Arithmetic 오류 검출 |
+| Main accumulator 또는 mod-7 accumulator의 LSB flip | 2 | Arithmetic 오류 검출 |
+| PE 내부 A valid 또는 boundary A valid 제거 | 2 | Transport·protocol 오류 검출 |
+| A 또는 B forwarding 값을 1→106으로 변경 | 2 | Raw transport checker에서 검출; arithmetic residue는 일치 |
+| A의 mod-7 forwarding sideband LSB flip | 1 | Transport·arithmetic 오류 검출 |
+| Drain beat 8 또는 마지막 beat 31에서 edge accumulator LSB flip | 2 | Arithmetic 오류 검출 |
+| Main accumulator에 105 추가 | 1 | 두 modulo가 같아 미검출되는 alias 확인 |
+| 수락 전 boundary A 입력을 1→0으로 변경 | 1 | 입력 보호 범위 밖이므로 미검출 확인 |
+
+검출을 기대하는 12개 case는 `tile_commit=0`, `replay_request=1`을 검사한다. 나머지 2개는 `EXPECTED_ALIAS`, `EXPECTED_UNPROTECTED_INPUT`으로 구분하며, 검출 성공으로 집계하지 않는다. 정상 입력 재제출은 TB의 동작이며 hardware 자동 복구가 아니다.
+
+추가로 계산 도중 reset이 tile을 중단하는지 확인하고, reset 이후 정상 GEMM 1개를 실행한다. 기본 설정의 정상 GEMM 구성은 **K=32에서 143개(128+14+1), K=1/7/31에서 각 8개로 총 167개**, 출력 비교 대상은 **171,008개**다. 이 수치는 테스트 구성에 따른 개수이며 전체 fault coverage를 의미하지 않는다.
+
+`tb_residue.v`는 signed residue 변환·reduction·작은 MAC·PE 동작을, `tb_stream_checker.v`는 raw byte 오류·순서 변경·token 누락/추가 등을 별도로 검사한다.
 
 ## Arithmetic and input contract
 

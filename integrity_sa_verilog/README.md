@@ -2,15 +2,7 @@
 
 순수 Verilog-2001의 32×32 output-stationary SA다. Signed INT8×INT8/INT32 GEMM, 독립적인 mod-7/mod-15 MAC, raw INT8 기반 XOR/rotation transport checker, east-edge output checking을 구현한다.
 
-현재 revision은 `raw_transport_no_sram`이다. **Operand buffer나 SRAM을 가정하거나 구현하지 않는다. SRAM tag generation/check 회로도 없다.** 외부 데이터와 valid만 수락한다. 향후 SRAM checker는 GEMM과 병렬인 별도 회로로 추가할 수 있지만, 이번 core에는 그 회로나 시간 분할 제어를 넣지 않았다.
-
-## 이번 수정
-
-- `a_tag_flat`, `b_tag_flat`, `CHECK_INPUT_TAGS`, `sram_error`와 저장 tag 비교 회로를 제거했다.
-- Transport token을 residue pair 7-bit에서 **raw INT8 bit pattern 8-bit**로 바꿨다.
-- Plain XOR state는 8-bit, rotation-XOR state는 기존 32-bit다. 회전량 9와 accepted-token 갱신, count 검사는 유지했다.
-- Arithmetic mod-7/mod-15 MAC, residue forwarding, 순차 compute/drain, 32행 병렬 출력, speculative commit은 유지했다.
-- 별도 result bank나 compute/drain 중첩은 추가하지 않았다.
+외부 데이터와 valid를 수락하는 SA core다. Operand buffer, SRAM 및 SRAM tag generation/check 회로는 포함하지 않는다.
 
 ## Files and execution
 
@@ -36,7 +28,7 @@
 
 기본 시험은 K=32 초기 정상 GEMM 128개, directed case 14개와 원래 입력 재제출 14회, reset 후 정상 tile 1개를 수행한다. K=1/7/31도 각 8개 정상 GEMM을 수행한다. **정상 GEMM 167개 / golden output 171,008개가 통과했다.** Directed case는 검출 12개, 명시적으로 확인한 보호 한계 2개다. 한계 사례는 정상 GEMM이나 검출 성공 수에 넣지 않는다.
 
-현재 결과는 `build/raw_transport_no_sram/`에 저장한다. 기존 `build/*.log`와 `build/synth/`는 SRAM tag가 있던 **이전 revision**의 기록이다. `VALIDATION.md`가 현재 검증 기록이다.
+실행 결과는 `build/raw_transport_no_sram/`에 저장한다. 검증 결과와 유효 범위는 `VALIDATION.md`에 정리되어 있다.
 
 합성 wrapper는 이 호스트의 Vivado/Windows Tcl 정리 오류를 피하려고 고유 임시 디렉터리와 `--keep-temp`를 사용한다. 임시 경로와 source hash를 기록하며 설치 파일은 수정하지 않는다. FPGA 합성과 구조 검사, device-fit/DRC, 배치·배선 결과는 구분한다.
 
@@ -85,7 +77,7 @@ P는 8-bit, Q는 32-bit이며 ingress/egress에 각각 유지한다. Accepted to
 
 Egress의 INT8 converter는 전달된 **arithmetic sideband가 raw data와 같은지** 비교하는 데 사용한다. 이것은 저장 tag 검사가 아니다. Converter 수는 INT8 pair 128개(ingress 64 + egress 64), INT32 pair 32개(edge)다. Signed 변환은 unsigned residue에서 sign에 따른 2^8/2^32 보정을 하며 보정값은 mod-7=4, mod-15=1이다.
 
-Raw fingerprint는 `1→106`처럼 modulo가 같은 forwarding 오류도 검출한다. 여러 token의 오류 상쇄나 checker/control 공통모드 오류까지 해결한 것은 아니다. Main accumulator의 +105 alias는 arithmetic check에 여전히 남는다.
+Raw fingerprint는 `1→106`처럼 modulo가 같은 forwarding 오류도 검출한다. 여러 token의 오류 상쇄나 checker/control 공통모드 오류는 미검출될 수 있다. Main accumulator의 +105 alias는 arithmetic check로 검출할 수 없다.
 
 ## Output and commit
 
@@ -98,7 +90,7 @@ accepted drain beat  1: C[0..31,30]
 accepted drain beat 31: C[0..31, 0]
 ```
 
-32행이 병렬로 east 방향으로 한 칸씩 이동하므로 32 results/cycle이다. Main accumulator와 두 residue accumulator를 함께 이동시키며 기존 register를 drain에 재사용한다. **이 단순 구현은 compute/drain을 겹치지 않는다. 입력 공급 장치 때문이 아니라 register 재사용과 기존 FSM을 유지한 결과다.**
+32행이 병렬로 east 방향으로 한 칸씩 이동하므로 32 results/cycle이다. Main accumulator와 두 residue accumulator를 함께 이동시킨다. **동일한 accumulator register를 계산과 drain에 사용하므로 compute와 drain은 순차적으로 수행한다.**
 
 East edge의 32개 converter/비교기가 각 PE의 최종 결과를 검사한다. Out_valid && out_ready에서 결과를 latch하고 shift한다. Out_ready=0이면 data, residue, out_bad, out_col 및 drain index를 유지한다. Out_r7_flat/out_r15_flat은 실제 출력 데이터의 residue를 보여주는 arithmetic 관측 포트다. SRAM tag 생성기나 write protocol은 아니다.
 
@@ -131,7 +123,7 @@ Error는 다음 accepted start/reset까지 sticky다. Out_valid=0이면 출력 d
 
 ## Protection boundary
 
-기준 입력은 SA boundary에서 수락한 값이다. **입력이 그 전에 손상됐다면 그것을 판별할 저장 tag나 reference가 이번 core에는 없다.** 첫 A 입력이 1에서 0으로 바뀌면 main/shadow MAC과 transport fingerprint 모두 그 0을 기준으로 동작한다. 이 범위는 향후 별도 SRAM/입력 경로 checker가 담당할 수 있으나, 이번 RTL에는 해당 회로나 연결을 넣지 않았다.
+기준 입력은 SA boundary에서 수락한 값이다. **수락 이전의 입력 손상은 보호 범위 밖이다.** 첫 A 입력이 1에서 0으로 바뀌면 main/shadow MAC과 transport fingerprint 모두 그 0을 기준으로 동작한다. 이를 검출하려면 별도의 저장 tag 또는 입력 경로 reference가 필요하다.
 
 TB는 ingress 변경을 `EXPECTED_UNPROTECTED_INPUT`, accumulator +105를 `EXPECTED_ALIAS`로 따로 기록한다. 두 경우 모두 hardware는 replay를 요청하지 않는다. 그 뒤 정상 계산은 TB가 원래 입력을 명시적으로 재제출한 시험이다.
 
@@ -148,4 +140,4 @@ TB는 ingress 변경을 `EXPECTED_UNPROTECTED_INPUT`, accumulator +105를 `EXPEC
 | Controller/global flags | 21 |
 | **Total** | **78,677** |
 
-SRAM error state 제거와 XOR state 폭 증가의 순변화는 이전 대비 +127 bits다. 전체 area는 register 수만으로 판단할 수 없다. 현재 합성 결과는 VALIDATION.md에 기록하며 DMR 대비 ASIC 면적·전력 절감률은 baseline 없이 주장하지 않는다.
+전체 area는 register 수만으로 판단할 수 없다. 합성 결과는 `VALIDATION.md`에 기록되어 있으며, DMR 대비 ASIC 면적·전력 절감률은 동일 조건의 baseline 비교가 필요하다.
